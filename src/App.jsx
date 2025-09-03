@@ -457,7 +457,7 @@ function SolanaTokenLaunchpad() {
         )
       );
 
-  // Add metadata using CreateMetadataAccountV3
+      // Add metadata using CreateMetadataAccountV3
       setLaunchStatus('Creating metadata account...');
       const [metadataPDA] = await PublicKey.findProgramAddress(
         [
@@ -470,7 +470,7 @@ function SolanaTokenLaunchpad() {
 
       // Upload image to IPFS if provided
       const uri = tokenData.image ? await uploadImageToIPFS(tokenData.image) : '';
-      
+
       // CreateMetadataAccountV3 instruction data (discriminator: 33)
       const name = tokenData.name.slice(0, 32);
       const symbol = tokenData.symbol.slice(0, 10);
@@ -519,73 +519,157 @@ function SolanaTokenLaunchpad() {
       transaction.feePayer = publicKey;
       transaction.partialSign(mintKeypair);
 
-      setLaunchStatus('Please approve transaction in wallet...');
-      const signedTransaction = await signTransaction(transaction);
-      setLaunchStatus('Broadcasting transaction...');
-      const signature = await connection.sendRawTransaction(signedTransaction.serialize());
-      setLaunchStatus('Confirming transaction...');
-      await connection.confirmTransaction(signature, 'confirmed');
+      try {
+        setLaunchStatus('Please approve transaction in wallet...');
+        const signedTransaction = await signTransaction(transaction);
 
-      // Store token info
-      const tokenInfo = {
-        id: mintPublicKey.toString(),
-        name: tokenData.name,
-        symbol: tokenData.symbol,
-        description: tokenData.description,
-        supply: parseInt(tokenData.supply),
-        website: tokenData.website,
-        telegram: tokenData.telegram,
-        twitter: tokenData.twitter,
-        image: mediaPreview,
-        currentPrice: tokenData.initialPrice,
-        marketCap: parseInt(tokenData.supply) * tokenData.initialPrice,
-        progress: 0,
-        holders: 1,
-        volume24h: 0,
-        createdAt: new Date(),
-        transactionSignature: signature,
-        network,
-      };
+        setLaunchStatus('Broadcasting transaction...');
+        const signature = await connection.sendRawTransaction(signedTransaction.serialize(), {
+          skipPreflight: false,
+          preflightCommitment: 'confirmed',
+          maxRetries: 3
+        });
 
-      setCreatedTokenInfo(tokenInfo);
-      setLaunchedTokens(prev => [tokenInfo, ...prev]);
-      setSelectedToken(tokenInfo);
-      setActiveTab('monitor');
-      setLaunchStatus('Token created successfully! View in Monitor tab.');
+        setLaunchStatus(`Transaction sent: ${signature.slice(0, 8)}...`);
 
-      setTokenData({
-        name: '',
-        symbol: '',
-        description: '',
-        supply: 1000000,
-        decimals: 9,
-        website: '',
-        telegram: '',
-        twitter: '',
-        image: null,
-        initialPrice: 0.001,
-        softCap: 50,
-        hardCap: 200,
-        minBuy: 0.1,
-        maxBuy: 5,
-        liquidityPercentage: 70,
-        liquidityLockup: 180,
-      });
-      setMediaPreview(null);
-    } catch (error) {
-      console.error('Launch error:', error);
-      let errorMessage = `Error: ${error.message}`;
-      if (error.name === 'SendTransactionError') {
-        try {
-          const logs = await error.getLogs(connection);
-          console.error('Transaction logs:', logs);
-          errorMessage = `Transaction failed: ${error.message}. Logs: ${JSON.stringify(logs, null, 2)}`;
-        } catch (logError) {
-          console.error('Failed to fetch transaction logs:', logError);
-          errorMessage = `Transaction failed: ${error.message}. Unable to fetch logs.`;
+        // Improved confirmation with fallback strategy
+        let confirmed = false;
+        let confirmationAttempts = 0;
+        const maxConfirmationAttempts = 3;
+
+        while (!confirmed && confirmationAttempts < maxConfirmationAttempts) {
+          try {
+            confirmationAttempts++;
+            setLaunchStatus(`Confirming transaction (attempt ${confirmationAttempts}/${maxConfirmationAttempts})...`);
+
+            // Use a longer timeout and different commitment level
+            await connection.confirmTransaction({
+              signature,
+              blockhash: transaction.recentBlockhash,
+              lastValidBlockHeight: (await connection.getLatestBlockhash()).lastValidBlockHeight + 150
+            }, 'confirmed');
+
+            confirmed = true;
+
+          } catch (confirmError) {
+            console.warn(`Confirmation attempt ${confirmationAttempts} failed:`, confirmError);
+
+            if (confirmationAttempts >= maxConfirmationAttempts) {
+              // Fallback: Check transaction status manually
+              setLaunchStatus('Checking transaction status...');
+
+              try {
+                const txStatus = await connection.getSignatureStatus(signature, { searchTransactionHistory: true });
+
+                if (txStatus?.value?.confirmationStatus) {
+                  if (txStatus.value.err) {
+                    throw new Error(`Transaction failed: ${JSON.stringify(txStatus.value.err)}`);
+                  }
+
+                  if (txStatus.value.confirmationStatus === 'confirmed' || txStatus.value.confirmationStatus === 'finalized') {
+                    confirmed = true;
+                    setLaunchStatus(`Transaction confirmed via status check: ${signature}`);
+                  } else {
+                    throw new Error(`Transaction status: ${txStatus.value.confirmationStatus}`);
+                  }
+                } else {
+                  // Last resort: Check if mint account exists
+                  try {
+                    const mintInfo = await connection.getAccountInfo(mintPublicKey);
+                    if (mintInfo && mintInfo.data.length > 0) {
+                      confirmed = true;
+                      setLaunchStatus('Token creation verified via account check');
+                    } else {
+                      throw new Error('Transaction timeout - mint account not found');
+                    }
+                  } catch (accountError) {
+                    throw new Error(`Transaction confirmation failed: ${confirmError.message}`);
+                  }
+                }
+              } catch (statusError) {
+                throw new Error(`Transaction confirmation failed: ${statusError.message}`);
+              }
+            } else {
+              // Wait before retry
+              await new Promise(resolve => setTimeout(resolve, 2000));
+            }
+          }
         }
+
+        // Continue with token info creation only after successful confirmation
+        if (confirmed) {
+          // Store token info
+          const tokenInfo = {
+            id: mintPublicKey.toString(),
+            name: tokenData.name,
+            symbol: tokenData.symbol,
+            description: tokenData.description,
+            supply: parseInt(tokenData.supply),
+            website: tokenData.website,
+            telegram: tokenData.telegram,
+            twitter: tokenData.twitter,
+            image: mediaPreview,
+            currentPrice: tokenData.initialPrice,
+            marketCap: parseInt(tokenData.supply) * tokenData.initialPrice,
+            progress: 0,
+            holders: 1,
+            volume24h: 0,
+            createdAt: new Date(),
+            transactionSignature: signature,
+            network,
+          };
+
+          setCreatedTokenInfo(tokenInfo);
+          setLaunchedTokens(prev => [tokenInfo, ...prev]);
+          setSelectedToken(tokenInfo);
+          setActiveTab('monitor');
+          setLaunchStatus(`Token created successfully! Signature: ${signature}`);
+
+          // Reset form
+          setTokenData({
+            name: '',
+            symbol: '',
+            description: '',
+            supply: 1000000,
+            decimals: 9,
+            website: '',
+            telegram: '',
+            twitter: '',
+            image: null,
+            initialPrice: 0.001,
+            softCap: 50,
+            hardCap: 200,
+            minBuy: 0.1,
+            maxBuy: 5,
+            liquidityPercentage: 70,
+            liquidityLockup: 180,
+          });
+          setMediaPreview(null);
+        }
+
+      } catch (error) {
+        console.error('Launch error:', error);
+
+        // Enhanced error handling
+        let errorMessage = `Error: ${error.message}`;
+
+        if (error.message.includes('Transaction was not confirmed')) {
+          const signature = error.message.match(/signature (\w+)/)?.[1];
+          if (signature) {
+            errorMessage = `Transaction may have succeeded but confirmation timed out. Check signature: ${signature}`;
+            setLaunchStatus(errorMessage + ` - Check in Explorer: https://explorer.solana.com/tx/${signature}${network === 'devnet' ? '?cluster=devnet' : ''}`);
+          }
+        } else if (error.name === 'SendTransactionError') {
+          try {
+            const logs = await connection.getLogs(signature);
+            errorMessage = `Transaction failed: ${error.message}. Logs: ${JSON.stringify(logs, null, 2)}`;
+          } catch (logError) {
+            errorMessage = `Transaction failed: ${error.message}`;
+          }
+        }
+
+        setLaunchStatus(errorMessage);
       }
-      setLaunchStatus(errorMessage);
     } finally {
       setIsLaunching(false);
     }
@@ -598,23 +682,20 @@ function SolanaTokenLaunchpad() {
           <div className="flex items-center justify-center w-10 h-10 rounded-full bg-gradient-to-r from-blue-500 to-violet-500">
             <img src="https://dd.dexscreener.com/ds-data/tokens/solana/DaUq6WNeLkwjdnWFk3xC6NVXpTXfLotVnUCd4qL9Ling.png?size=lg&key=a4ee8c" alt="" srcset="" />
           </div>
-          <span className="text-xl font-bold">CA: DaUq6WNeLkwjdnWFk3xC6NVXpTXfLotVnUCd4qL9Ling</span>
         </div>
         <div className="flex items-center gap-4">
           <div className="flex items-center bg-slate-800/50 rounded-full p-1 border border-slate-700">
             <button
               onClick={() => setNetwork('devnet')}
-              className={`px-3 py-1.5 rounded-full text-sm font-medium transition-all ${
-                network === 'devnet' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'
-              }`}
+              className={`px-3 py-1.5 rounded-full text-sm font-medium transition-all ${network === 'devnet' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'
+                }`}
             >
               Devnet
             </button>
             <button
               onClick={() => setNetwork('mainnet')}
-              className={`px-3 py-1.5 rounded-full text-sm font-medium transition-all ${
-                network === 'mainnet' ? 'bg-red-600 text-white' : 'text-slate-400 hover:text-white'
-              }`}
+              className={`px-3 py-1.5 rounded-full text-sm font-medium transition-all ${network === 'mainnet' ? 'bg-red-600 text-white' : 'text-slate-400 hover:text-white'
+                }`}
             >
               Mainnet
             </button>
@@ -624,9 +705,8 @@ function SolanaTokenLaunchpad() {
           </div>
           <button
             onClick={connected ? handleDisconnect : handleConnect}
-            className={`flex items-center gap-2 px-4 py-2 rounded-full bg-gradient-to-r ${
-              connected ? 'from-green-500 to-emerald-600' : 'from-blue-500 to-violet-600'
-            } text-white font-medium hover:shadow-lg transition-all`}
+            className={`flex items-center gap-2 px-4 py-2 rounded-full bg-gradient-to-r ${connected ? 'from-green-500 to-emerald-600' : 'from-blue-500 to-violet-600'
+              } text-white font-medium hover:shadow-lg transition-all`}
           >
             <Wallet size={16} />
             {connected && publicKey
@@ -641,21 +721,19 @@ function SolanaTokenLaunchpad() {
           <div className="bg-slate-800/30 p-1 rounded-lg flex gap-1 border border-slate-700/50">
             <button
               onClick={() => setActiveTab('create')}
-              className={`px-6 py-2 rounded-md font-medium transition-all ${
-                activeTab === 'create'
+              className={`px-6 py-2 rounded-md font-medium transition-all ${activeTab === 'create'
                   ? 'bg-gradient-to-r from-blue-500 to-violet-600 text-white'
                   : 'text-slate-400 hover:text-white hover:bg-slate-700/30'
-              }`}
+                }`}
             >
               Create Token
             </button>
             <button
               onClick={() => setActiveTab('monitor')}
-              className={`px-6 py-2 rounded-md font-medium transition-all flex items-center gap-2 ${
-                activeTab === 'monitor'
+              className={`px-6 py-2 rounded-md font-medium transition-all flex items-center gap-2 ${activeTab === 'monitor'
                   ? 'bg-gradient-to-r from-blue-500 to-violet-600 text-white'
                   : 'text-slate-400 hover:text-white hover:bg-slate-700/30'
-              }`}
+                }`}
             >
               Monitor Launches
               {launchedTokens.length > 0 && (
@@ -687,9 +765,8 @@ function SolanaTokenLaunchpad() {
                   <label className="block text-sm font-medium text-slate-300 mb-2">Token Image</label>
                   <label
                     htmlFor="imageUpload"
-                    className={`block border-2 border-dashed border-slate-600 rounded-xl p-8 text-center bg-slate-800/30 cursor-pointer transition-all hover:border-blue-400/50 hover:bg-slate-800/50 ${
-                      validationErrors.image ? 'border-red-500/70' : ''
-                    }`}
+                    className={`block border-2 border-dashed border-slate-600 rounded-xl p-8 text-center bg-slate-800/30 cursor-pointer transition-all hover:border-blue-400/50 hover:bg-slate-800/50 ${validationErrors.image ? 'border-red-500/70' : ''
+                      }`}
                   >
                     {mediaPreview ? (
                       <img src={mediaPreview} alt="Token" className="w-24 h-24 rounded-full object-cover mx-auto" />
@@ -713,9 +790,8 @@ function SolanaTokenLaunchpad() {
                       placeholder="My Awesome Token"
                       value={tokenData.name}
                       onChange={(e) => handleInputChange('name', e.target.value)}
-                      className={`w-full bg-slate-800/70 border ${
-                        validationErrors.name ? 'border-red-500/70' : 'border-slate-600'
-                      } rounded-lg px-4 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-transparent`}
+                      className={`w-full bg-slate-800/70 border ${validationErrors.name ? 'border-red-500/70' : 'border-slate-600'
+                        } rounded-lg px-4 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-transparent`}
                     />
                     {validationErrors.name && <p className="text-red-400 text-sm mt-1">{validationErrors.name}</p>}
                   </div>
@@ -726,9 +802,8 @@ function SolanaTokenLaunchpad() {
                       placeholder="TICKER"
                       value={tokenData.symbol}
                       onChange={(e) => handleInputChange('symbol', e.target.value)}
-                      className={`w-full bg-slate-800/70 border ${
-                        validationErrors.symbol ? 'border-red-500/70' : 'border-slate-600'
-                      } rounded-lg px-4 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-transparent`}
+                      className={`w-full bg-slate-800/70 border ${validationErrors.symbol ? 'border-red-500/70' : 'border-slate-600'
+                        } rounded-lg px-4 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-transparent`}
                     />
                     {validationErrors.symbol && <p className="text-red-400 text-sm mt-1">{validationErrors.symbol}</p>}
                   </div>
@@ -750,9 +825,8 @@ function SolanaTokenLaunchpad() {
                     type="number"
                     value={tokenData.supply}
                     onChange={(e) => handleInputChange('supply', parseInt(e.target.value) || 1000000)}
-                    className={`w-full bg-slate-800/70 border ${
-                      validationErrors.supply ? 'border-red-500/70' : 'border-slate-600'
-                    } rounded-lg px-4 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-transparent`}
+                    className={`w-full bg-slate-800/70 border ${validationErrors.supply ? 'border-red-500/70' : 'border-slate-600'
+                      } rounded-lg px-4 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-transparent`}
                     min="1"
                     max="1000000000000"
                   />
@@ -767,9 +841,8 @@ function SolanaTokenLaunchpad() {
                       placeholder="https://mytoken.com"
                       value={tokenData.website}
                       onChange={(e) => handleInputChange('website', e.target.value)}
-                      className={`w-full bg-slate-800/70 border ${
-                        validationErrors.website ? 'border-red-500/70' : 'border-slate-600'
-                      } rounded-lg px-4 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-transparent`}
+                      className={`w-full bg-slate-800/70 border ${validationErrors.website ? 'border-red-500/70' : 'border-slate-600'
+                        } rounded-lg px-4 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-transparent`}
                     />
                     {validationErrors.website && <p className="text-red-400 text-sm mt-1">{validationErrors.website}</p>}
                   </div>
@@ -850,9 +923,8 @@ function SolanaTokenLaunchpad() {
                           value={tokenData.hardCap}
                           onChange={(e) => handleInputChange('hardCap', parseFloat(e.target.value))}
                           min="1"
-                          className={`w-full bg-slate-800/70 border ${
-                            validationErrors.hardCap ? 'border-red-500/70' : 'border-slate-600'
-                          } rounded-lg px-4 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-transparent`}
+                          className={`w-full bg-slate-800/70 border ${validationErrors.hardCap ? 'border-red-500/70' : 'border-slate-600'
+                            } rounded-lg px-4 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-transparent`}
                         />
                         {validationErrors.hardCap && <p className="text-red-400 text-sm mt-1">{validationErrors.hardCap}</p>}
                       </div>
@@ -866,9 +938,8 @@ function SolanaTokenLaunchpad() {
                           onChange={(e) => handleInputChange('liquidityPercentage', parseInt(e.target.value))}
                           min="50"
                           max="100"
-                          className={`w-full bg-slate-800/70 border ${
-                            validationErrors.liquidityPercentage ? 'border-red-500/70' : 'border-slate-600'
-                          } rounded-lg px-4 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-transparent`}
+                          className={`w-full bg-slate-800/70 border ${validationErrors.liquidityPercentage ? 'border-red-500/70' : 'border-slate-600'
+                            } rounded-lg px-4 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-transparent`}
                         />
                         {validationErrors.liquidityPercentage && (
                           <p className="text-red-400 text-sm mt-1">{validationErrors.liquidityPercentage}</p>
@@ -890,11 +961,10 @@ function SolanaTokenLaunchpad() {
                 <button
                   onClick={handleLaunch}
                   disabled={!tokenData.name || !tokenData.symbol || isLaunching || !connected}
-                  className={`w-full py-3 px-4 rounded-lg font-semibold text-white flex items-center justify-center gap-2 ${
-                    !tokenData.name || !tokenData.symbol || isLaunching || !connected
+                  className={`w-full py-3 px-4 rounded-lg font-semibold text-white flex items-center justify-center gap-2 ${!tokenData.name || !tokenData.symbol || isLaunching || !connected
                       ? 'bg-slate-700 cursor-not-allowed opacity-60'
                       : 'bg-gradient-to-r from-blue-600 to-violet-600 hover:from-blue-500 hover:to-violet-500 cursor-pointer'
-                  }`}
+                    }`}
                 >
                   {isLaunching ? (
                     <>
@@ -918,13 +988,12 @@ function SolanaTokenLaunchpad() {
                   </p>
                   {launchStatus && (
                     <p
-                      className={`text-sm mt-3 font-medium ${
-                        launchStatus.includes('Error') || launchStatus.includes('Please') || launchStatus.includes('failed') || launchStatus.includes('Insufficient')
+                      className={`text-sm mt-3 font-medium ${launchStatus.includes('Error') || launchStatus.includes('Please') || launchStatus.includes('failed') || launchStatus.includes('Insufficient')
                           ? 'text-red-400'
                           : launchStatus.includes('success') || launchStatus.includes('created') || launchStatus.includes('Connected')
-                          ? 'text-green-400'
-                          : 'text-blue-300'
-                      }`}
+                            ? 'text-green-400'
+                            : 'text-blue-300'
+                        }`}
                     >
                       {launchStatus}
                     </p>
@@ -1050,11 +1119,10 @@ function SolanaTokenLaunchpad() {
                       <div
                         key={token.id}
                         onClick={() => setSelectedToken(token)}
-                        className={`p-3 rounded-lg cursor-pointer transition-all ${
-                          selectedToken?.id === token.id
+                        className={`p-3 rounded-lg cursor-pointer transition-all ${selectedToken?.id === token.id
                             ? 'border-2 border-violet-500 bg-violet-500/10'
                             : 'border border-slate-700 bg-slate-800/50 hover:bg-slate-800'
-                        }`}
+                          }`}
                       >
                         <div className="flex justify-between items-start mb-2">
                           <div className="flex items-center gap-2">
