@@ -6,40 +6,35 @@ export default defineConfig({
   plugins: [
     react(),
     nodePolyfills({
-      globals: {
-        Buffer: true,
-        global: true,
-        process: true,
-      },
-      protocolImports: true,
+      buffer: true,
+      crypto: true,
+      process: true,
     }),
   ],
-  define: {
-    global: 'window',
-    'process.env': {},
-  },
   optimizeDeps: {
-    esbuildOptions: {
-      define: {
-        global: 'globalThis',
-      },
-    },
     include: [
       '@solana/web3.js',
       '@solana/spl-token',
-      '@metaplex-foundation/umi',
-      '@metaplex-foundation/umi-bundle-defaults',
-      '@metaplex-foundation/mpl-token-metadata',
-      '@metaplex-foundation/umi-uploader-irys',
-      '@metaplex-foundation/umi-signer-wallet-adapters',
+      '@metaplex-foundation/js',
+      '@solana/wallet-adapter-base',
       '@solana/wallet-adapter-react',
       '@solana/wallet-adapter-wallets',
-      'web3.storage',
+      '@raydium-io/raydium-sdk',
+      'lucide-react',
       'buffer',
+      'crypto-browserify',
+      'stream-browserify',
     ],
   },
-  build: {
-    minify: 'esbuild',
-    sourcemap: false,
+  resolve: {
+    alias: {
+      buffer: 'buffer',
+      crypto: 'crypto-browserify',
+      stream: 'stream-browserify',
+    },
+  },
+  define: {
+    'process.env': {},
+    global: 'globalThis',
   },
 });
